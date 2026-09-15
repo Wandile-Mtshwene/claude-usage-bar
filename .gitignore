@@ -1,0 +1,7 @@
+# Build output
+ClaudeUsage.app/
+*.o
+.build/
+
+# macOS
+.DS_Store
