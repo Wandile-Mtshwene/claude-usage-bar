@@ -20,8 +20,26 @@ the browser to check where you stand.
 - **Click to expand:**
   - **Session (5h)** and **Week (7d)** bars, each with the exact `%`, the **absolute
     reset clock-time** ("Resets 3:20 PM") and the countdown beneath it ("in 1h 11m").
+  - Per-model weekly caps (Opus / Sonnet) when your plan reports them.
   - **Weekly by product** breakdown (Claude Code, Chats, etc.).
   - A settings section.
+- **Notifications** when a window crosses your chosen threshold (once per window).
+- **Refreshes on wake** so the numbers are current right after your Mac sleeps.
+
+## Download
+
+Grab the latest `ClaudeUsage.zip` from the
+[Releases](https://github.com/Wandile-Mtshwene/claude-usage-bar/releases) page, unzip,
+and move `ClaudeUsage.app` to `/Applications`. The build is ad-hoc signed (not notarized),
+so the first launch needs a Gatekeeper nudge:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/ClaudeUsage.app
+open /Applications/ClaudeUsage.app
+```
+
+(or right-click the app → **Open** → **Open**). Prefer building it yourself? See
+[Build & run](#build--run).
 
 ## How it works
 
@@ -64,6 +82,7 @@ Click the pill to open the panel:
 - **Launch at login** — enabled by default; registered via `SMAppService`.
 - **Refresh every** — 30s / 1m / 5m.
 - **Turn red at** — 70% / 80% / 90%.
+- **Notify at** — Off / 80% / 90% / 95% (fires a notification once per window crossing).
 
 All settings persist across launches. The menu-bar countdown re-renders every 30s so it
 stays accurate between network refreshes.

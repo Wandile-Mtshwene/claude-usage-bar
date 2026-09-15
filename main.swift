@@ -11,6 +11,7 @@ import AppKit
 import SwiftUI
 import Combine
 import ServiceManagement
+import UserNotifications
 
 // MARK: - Model
 
@@ -22,6 +23,8 @@ struct UsageWindow {
 final class UsageModel: ObservableObject {
     @Published var session: UsageWindow?
     @Published var week: UsageWindow?
+    @Published var weekOpus: UsageWindow?     // populated only on plans with per-model caps
+    @Published var weekSonnet: UsageWindow?
     @Published var breakdown: [(name: String, percent: Double)] = []
     @Published var lastUpdated: Date?
     @Published var errorText: String?
@@ -43,7 +46,15 @@ final class UsageModel: ObservableObject {
             onUpdate?()
         }
     }
+    // 0 = off. Otherwise notify once when a window crosses this % (until it resets).
+    @Published var notifyThreshold: Double = UserDefaults.standard.object(forKey: "notifyThreshold") as? Double ?? 90 {
+        didSet { UserDefaults.standard.set(notifyThreshold, forKey: "notifyThreshold") }
+    }
     @Published var launchAtLogin: Bool = false
+
+    // Guards so we alert once per window rather than every poll.
+    private var sessionNotified = false
+    private var weekNotified = false
 
     var onUpdate: (() -> Void)?
     var onReschedule: (() -> Void)?
@@ -119,6 +130,8 @@ final class UsageModel: ObservableObject {
                 self.errorText = nil
                 self.session = Self.parseWindow(root["five_hour"])
                 self.week = Self.parseWindow(root["seven_day"])
+                self.weekOpus = Self.parseWindow(root["seven_day_opus"])
+                self.weekSonnet = Self.parseWindow(root["seven_day_sonnet"])
                 if let bd = root["seven_day_breakdown"] as? [String: Any],
                    let rows = bd["rows"] as? [[String: Any]] {
                     self.breakdown = rows.compactMap {
@@ -128,9 +141,43 @@ final class UsageModel: ObservableObject {
                     }.filter { $0.1 > 0 }
                 }
                 self.lastUpdated = Date()
+                self.checkNotifications()
                 self.onUpdate?()
             }
         }.resume()
+    }
+
+    /// Fire a local notification once when a window first crosses the threshold;
+    /// re-arm only after it drops back below (i.e. the window reset).
+    private func checkNotifications() {
+        guard notifyThreshold > 0 else { return }
+        if let s = session?.utilization {
+            if s >= notifyThreshold, !sessionNotified {
+                sessionNotified = true
+                Self.notify(title: "Session usage \(Int(s.rounded()))%",
+                            body: "Your Claude 5-hour window is at \(Int(s.rounded()))%.")
+            } else if s < notifyThreshold {
+                sessionNotified = false
+            }
+        }
+        if let w = week?.utilization {
+            if w >= notifyThreshold, !weekNotified {
+                weekNotified = true
+                Self.notify(title: "Weekly usage \(Int(w.rounded()))%",
+                            body: "Your Claude 7-day window is at \(Int(w.rounded()))%.")
+            } else if w < notifyThreshold {
+                weekNotified = false
+            }
+        }
+    }
+
+    private static func notify(title: String, body: String) {
+        let c = UNMutableNotificationContent()
+        c.title = title
+        c.body = body
+        c.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
     }
 
     private static func parseWindow(_ any: Any?) -> UsageWindow? {
@@ -327,6 +374,8 @@ struct PopoverView: View {
 
             WindowRow(title: "Session (5h)", window: model.session)
             WindowRow(title: "Week (7d)", window: model.week)
+            if let opus = model.weekOpus { WindowRow(title: "Week · Opus", window: opus) }
+            if let sonnet = model.weekSonnet { WindowRow(title: "Week · Sonnet", window: sonnet) }
 
             if !model.breakdown.isEmpty {
                 Divider()
@@ -369,6 +418,14 @@ struct PopoverView: View {
                     Spacer()
                     Picker("", selection: $model.warnThreshold) {
                         Text("70%").tag(70.0); Text("80%").tag(80.0); Text("90%").tag(90.0)
+                    }.labelsHidden().frame(width: 78).controlSize(.small).tint(claudeCoral)
+                }
+                HStack {
+                    Text("Notify at").font(.system(size: 11))
+                    Spacer()
+                    Picker("", selection: $model.notifyThreshold) {
+                        Text("Off").tag(0.0); Text("80%").tag(80.0)
+                        Text("90%").tag(90.0); Text("95%").tag(95.0)
                     }.labelsHidden().frame(width: 78).controlSize(.small).tint(claudeCoral)
                 }
             }
@@ -425,7 +482,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         displayTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.updateStatusTitle()
         }
+
+        // Refresh immediately when the Mac wakes — numbers go stale during sleep.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(systemDidWake),
+            name: NSWorkspace.didWakeNotification, object: nil)
+
+        // Ask once for permission to post threshold notifications.
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
+
+    @objc private func systemDidWake() { model.refresh(force: true) }
 
     private func scheduleTimer() {
         timer?.invalidate()
