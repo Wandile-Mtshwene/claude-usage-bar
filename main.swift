@@ -25,6 +25,8 @@ final class UsageModel: ObservableObject {
     @Published var breakdown: [(name: String, percent: Double)] = []
     @Published var lastUpdated: Date?
     @Published var errorText: String?
+    @Published var isAuthError = false     // token missing/expired — the only actionable state
+    private var lastAttempt: Date?
     @Published var showText: Bool = UserDefaults.standard.object(forKey: "showText") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showText, forKey: "showText"); onUpdate?() }
     }
@@ -65,9 +67,16 @@ final class UsageModel: ObservableObject {
         return token
     }
 
-    func refresh() {
+    /// `force` bypasses the debounce (used by the manual Refresh button).
+    func refresh(force: Bool = false) {
+        // Debounce: avoid stacking timer ticks + popover-open refreshes into the
+        // rate limit. Skip if we attempted within the last 20s.
+        if !force, let la = lastAttempt, Date().timeIntervalSince(la) < 20 { return }
+        lastAttempt = Date()
+
         guard let token = accessToken() else {
             DispatchQueue.main.async {
+                self.isAuthError = true
                 self.errorText = "No Claude token in Keychain. Open Claude Code once to sign in."
                 self.onUpdate?()
             }
@@ -81,19 +90,32 @@ final class UsageModel: ObservableObject {
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
             guard let self else { return }
             DispatchQueue.main.async {
-                if let err = err {
-                    self.errorText = "Network error: \(err.localizedDescription)"
+                // On any transient failure, keep the last-known numbers on screen.
+                if err != nil {
+                    self.errorText = "Network error — retrying"
                     self.onUpdate?(); return
                 }
-                if let http = resp as? HTTPURLResponse, http.statusCode == 401 {
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                if code == 401 {
+                    self.isAuthError = true
                     self.errorText = "Token expired. Run any Claude Code command to refresh."
                     self.onUpdate?(); return
                 }
-                guard let data = data,
-                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    self.errorText = "Bad response from usage API."
+                if code == 429 {
+                    self.errorText = "Rate limited — backing off"
                     self.onUpdate?(); return
                 }
+                if code != 200 {
+                    self.errorText = "Usage API error (HTTP \(code))"
+                    self.onUpdate?(); return
+                }
+                guard let data = data,
+                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      root["five_hour"] != nil else {
+                    self.errorText = "Unexpected response"
+                    self.onUpdate?(); return
+                }
+                self.isAuthError = false
                 self.errorText = nil
                 self.session = Self.parseWindow(root["five_hour"])
                 self.week = Self.parseWindow(root["seven_day"])
@@ -292,7 +314,7 @@ struct PopoverView: View {
                 RoundedRectangle(cornerRadius: 4).fill(claudeCoral).frame(width: 14, height: 14)
                 Text("Claude Usage").font(.system(size: 13, weight: .bold)).foregroundColor(claudeCoral)
                 Spacer()
-                Button(action: { model.refresh() }) {
+                Button(action: { model.refresh(force: true) }) {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold))
                         .foregroundColor(claudeCoral)
                 }.buttonStyle(.borderless).help("Refresh now")
@@ -417,24 +439,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.title = ""
         button.imagePosition = .imageOnly
 
-        // Menu bar shows only the short-window (session) limit.
-        if model.errorText != nil {
-            button.image = pillImage(text: "!", bg: warnRedNS, fg: claudeCreamNS)
+        // Prefer the last-known session number. Transient errors (429, network)
+        // keep showing it rather than blanking the pill.
+        if let s = model.session?.utilization {
+            if !model.showText {
+                button.image = dotImage(color: nsColor(for: s))
+                return
+            }
+            let pct = "\(Int(s.rounded()))%"
+            let time = model.showResetInBar ? compactReset(model.session?.resetsAt) : ""
+            button.image = time.isEmpty
+                ? pillImage(text: pct, bg: nsColor(for: s), fg: claudeCreamNS)
+                : pillImageDual(pct: pct, time: time, bg: nsColor(for: s), fg: claudeCreamNS)
             return
         }
-        guard let s = model.session?.utilization else {
+        // No data yet: only surface an actionable auth problem; otherwise loading.
+        if model.isAuthError {
+            button.image = pillImage(text: "sign in", bg: warnRedNS, fg: claudeCreamNS)
+        } else {
             button.image = pillImage(text: "…", bg: .systemGray, fg: .white)
-            return
         }
-        if !model.showText {
-            button.image = dotImage(color: nsColor(for: s))
-            return
-        }
-        let pct = "\(Int(s.rounded()))%"
-        let time = model.showResetInBar ? compactReset(model.session?.resetsAt) : ""
-        button.image = time.isEmpty
-            ? pillImage(text: pct, bg: nsColor(for: s), fg: claudeCreamNS)
-            : pillImageDual(pct: pct, time: time, bg: nsColor(for: s), fg: claudeCreamNS)
     }
 
     @objc private func togglePopover() {
