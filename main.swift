@@ -534,7 +534,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if let button = statusItem.button {
             model.refresh()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+            // An accessory (menu-bar-only) app isn't active by default, so the
+            // popover window can't take clicks for its SwiftUI buttons. Activate
+            // the app and make the popover window key + front.
+            NSApp.activate(ignoringOtherApps: true)
+            popover.contentViewController?.view.window?.makeKeyAndOrderFront(nil)
         }
     }
 
